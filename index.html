@@ -9,6 +9,23 @@
   <meta name="description" content="Expanding ripple rings with evolving spawn rate and soft plop sounds. Click to enable audio.">
 </head>
 <body>
+  <div id="audio-gate">
+  <button id="audio-btn">TAP FOR SOUND</button>
+</div>
+
+<style>
+  #audio-gate {
+    position: fixed; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    background: rgba(11,26,42,0.85); /* deep blue w/ translucency */
+    z-index: 9999;
+  }
+  #audio-btn {
+    font: 600 16px system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
+    padding: 12px 18px; border-radius: 10px; border: 0;
+    background: white; color: #0b1a2a; letter-spacing: 0.04em;
+  }
+</style>
   <!-- p5.js and p5.sound from CDN -->
   <script src="https://cdn.jsdelivr.net/npm/p5@1.9.3/lib/p5.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/p5@1.9.3/lib/addons/p5.sound.min.js"></script>
