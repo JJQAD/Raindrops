@@ -264,12 +264,15 @@ function mousePressed() { hintFading = true; enableAudioIfNeeded(); }
 function touchStarted() { hintFading = true; enableAudioIfNeeded(); }
 function keyPressed()   { hintFading = true; enableAudioIfNeeded(); }
 
-function enableAudioIfNeeded() {
-  const ctx = getAudioContext();
-  if (ctx.state !== 'running') {
-    userStartAudio().then(() => { audioEnabled = true; })
-                    .catch(() => { audioEnabled = false; });
-  } else {
-    audioEnabled = true;
+async function enableAudioIfNeeded() {
+  try {
+    const ctx = getAudioContext();
+    // Must run inside a user gesture on iOS
+    await userStartAudio();
+    if (ctx.state !== 'running') await ctx.resume();
+    audioEnabled = (ctx.state === 'running');
+    if (audioEnabled) hintFading = true; // fade your "CLICK FOR SOUND" text
+  } catch (e) {
+    audioEnabled = false;
   }
 }
