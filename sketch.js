@@ -1,9 +1,15 @@
-// p5.js sketch: Raindrop ripples with curved spawn schedule + ploppy notes + hint text
-// Add **p5.sound** via the CDN in index.html (already included).
+// sketch.js — Raindrop ripples with RANDOMIZED spawn-interval timeline
+// - Always start SLOW (10000 ms/drop)
+// - Ramp up to FAST (250 ms/drop) over 45 s
+// - Hold FAST for 45 s
+// - After that, endlessly create new *ramp segments* where:
+//     • duration is randomly chosen from {15, 30, 45} seconds
+//     • target interval is randomly chosen from 250..10000 ms in 250 ms steps
+// - Rings + soft “plop” notes in G major; click to enable audio. Hint fades out.
 
 // ============ Visual knobs ============
 const GROWTH_RATE_PX_PER_SEC = 140; // ring expansion speed
-const START_RADIUS = 0;             // 0 = point birth (try 1–2)
+const START_RADIUS = 0;             // 0 = point birth
 const STROKE_WEIGHT = 2;            // ring outline thickness
 
 // Color in HSL: dark blue -> light blue as it grows, plus alpha fade-out
@@ -13,22 +19,15 @@ const LIGHT_DARK = 25;       // starting lightness (%)
 const LIGHT_LIGHT = 70;      // ending lightness (%)
 const FADE_CURVE_POWER = 1.4;// 1 = linear; >1 lingers darker then fades
 
-// ============ Spawn schedule ============
-// We modulate the *interval* between spawns (in ms).
-// Slow = 10000ms per drop; Fast = 250ms per drop (updated).
-const SLOW_INTERVAL_MS = 10000;
-const FAST_INTERVAL_MS = 250;   // UPDATED
+// ============ Spawn interval timeline ============
+const SLOW_INTERVAL_MS = 10000; // fixed start
+const FAST_INTERVAL_MS = 250;   // fixed fast target
 
-// Timing (seconds) — UPDATED: ramp up 45s, fast hold 45s
-const RAMP_UP_SECONDS   = 45;   // slow -> fast on a steepening curve (UPDATED)
-const FAST_HOLD_SECONDS = 45;   // hold fast (UPDATED)
-const RAMP_DOWN_SECONDS = 30;   // fast -> slow on a more gradual curve
-const SLOW_HOLD_SECONDS = 30;   // hold slow
-
-// Curves (exponents): higher = steeper near the end.
-// Up should be steeper; down should be more gradual.
-const RAMP_UP_POWER   = 3.0;  // Ease-in cubic (steepening)
-const RAMP_DOWN_POWER = 2.0;  // Ease-in quad (more gradual than up)
+// After the initial two segments, each new segment picks:
+const RANDOM_DURATIONS_SEC = [15, 30, 45];     // segment length choices (seconds)
+const MIN_INTERVAL_MS = 250;                   // random interval floor
+const MAX_INTERVAL_MS = 10000;                 // random interval ceiling
+const INTERVAL_STEP_MS = 250;                  // step size for random intervals
 
 // ============ Sound knobs (lower, “plop”) ============
 const ENABLE_SOUND = true;
@@ -49,6 +48,7 @@ const G_MAJOR_MIDI = [67, 69, 71, 72, 74, 76, 78, 79];
 const HINT_TEXT = "CLICK FOR SOUND";
 const HINT_FADE_SECONDS = 1.0; // fade-out duration after first click
 
+// ------- internal state -------
 let drops = [];
 let spawnAccumulator = 0; // when >= 1, spawn a drop
 
@@ -60,6 +60,10 @@ let audioEnabled = false;
 let hintAlpha = 1.0;     // 0..1 (colorMode alpha range)
 let hintFading = false;  // start fading after user clicks
 
+// Interval timeline state
+let seg = null; // { t0, dur, startMs, endMs, type: "ramp"|"hold", _presetHoldNext? }
+
+// --------- Ripple class ----------
 class Drop {
   constructor(x, y) {
     this.x = x;
@@ -91,6 +95,7 @@ class Drop {
   }
 }
 
+// ===== p5 lifecycle =====
 function setup() {
   createCanvas(windowWidth, windowHeight);
   colorMode(HSL, 360, 100, 100, 1);
@@ -102,8 +107,13 @@ function setup() {
     synth = new p5.MonoSynth();
     synth.setADSR(ATTACK, DECAY, SUSTAIN, RELEASE);
     synth.oscillator.setType(WAVEFORM);
-    synth.portamento = 0; // we glide manually
+    synth.portamento = 0; // manual glide
   }
+
+  // Initialize the first segment as a ramp from SLOW -> FAST (45 s),
+  // then schedule an automatic hold at FAST (45 s) next.
+  seg = makeRampSegment(SLOW_INTERVAL_MS, FAST_INTERVAL_MS, 45);
+  seg._presetHoldNext = true;
 }
 
 function windowResized() {
@@ -115,8 +125,8 @@ function draw() {
   background(210, 70, 12); // deep blue
   const dtSec = deltaTime / 1000;
 
-  // --- Evolving, curved spawn interval ---
-  const intervalMs = currentSpawnIntervalMs();
+  // Determine current spawn interval from the active segment
+  const intervalMs = currentIntervalMs();
 
   // Accumulate spawns proportionally to (deltaTime / interval)
   spawnAccumulator += deltaTime / intervalMs;
@@ -147,45 +157,97 @@ function draw() {
       hintAlpha = max(0, hintAlpha - dtSec / HINT_FADE_SECONDS);
     }
     noStroke();
-    // Light text with current alpha (colorMode alpha is 0..1)
     fill(0, 0, 100, hintAlpha);
     textSize(14);
     text(HINT_TEXT, width / 2, 8);
   }
 }
 
-// ---- Curved schedule helpers ----
-function easeInPow(t, k) { return pow(constrain(t, 0, 1), k); }
+// ===== Interval timeline helpers =====
 
-function currentSpawnIntervalMs() {
-  const t = millis() / 1000;
-  const cycleLen =
-    RAMP_UP_SECONDS + FAST_HOLD_SECONDS + RAMP_DOWN_SECONDS + SLOW_HOLD_SECONDS;
-  const pos = t % cycleLen;
+// Create a ramp segment
+function makeRampSegment(startMs, endMs, durationSec) {
+  return {
+    type: "ramp",
+    t0: millis() / 1000,
+    dur: durationSec,
+    startMs,
+    endMs
+  };
+}
 
-  if (pos < RAMP_UP_SECONDS) {
-    // Steepening curve slow -> fast
-    const p = pos / RAMP_UP_SECONDS;           // 0..1
-    const eased = easeInPow(p, RAMP_UP_POWER); // small -> big (steep end)
-    return lerp(SLOW_INTERVAL_MS, FAST_INTERVAL_MS, eased);
+// Create a hold segment
+function makeHoldSegment(valueMs, durationSec) {
+  return {
+    type: "hold",
+    t0: millis() / 1000,
+    dur: durationSec,
+    startMs: valueMs,
+    endMs: valueMs
+  };
+}
+
+// Easing for ramps: smooth and natural
+function easeInOutCubic(t) {
+  t = constrain(t, 0, 1);
+  return t < 0.5 ? 4 * t * t * t : 1 - pow(-2 * t + 2, 3) / 2;
+}
+
+// Return the current interval value (ms) and advance segments as needed
+function currentIntervalMs() {
+  const now = millis() / 1000;
+  let elapsed = now - seg.t0;
+
+  // If current segment finished, advance to next segment
+  if (elapsed >= seg.dur) {
+    const endVal = seg.endMs;
+
+    if (seg._presetHoldNext) {
+      // Enforce the initial FAST hold (45 s), then clear the flag
+      seg = makeHoldSegment(FAST_INTERVAL_MS, 45);
+      // nothing preset after this
+    } else {
+      // After the initial 2 segments, always generate a new random *ramp* segment
+      // from the current end value to a random target interval, over a random duration.
+      const durSec = randomChoice(RANDOM_DURATIONS_SEC);
+      const targetMs = randomIntervalMsStepped(
+        MIN_INTERVAL_MS, MAX_INTERVAL_MS, INTERVAL_STEP_MS, endVal
+      );
+      seg = makeRampSegment(endVal, targetMs, durSec);
+    }
+    elapsed = 0; // reset
   }
 
-  let acc = RAMP_UP_SECONDS;
-
-  if (pos < (acc += FAST_HOLD_SECONDS)) {
-    // Hold fast
-    return FAST_INTERVAL_MS;
+  // Compute the current value based on segment type
+  if (seg.type === "hold") {
+    return seg.startMs; // constant
+  } else {
+    // ramp
+    const t = easeInOutCubic((now - seg.t0) / seg.dur);
+    return lerp(seg.startMs, seg.endMs, t);
   }
+}
 
-  if (pos < (acc += RAMP_DOWN_SECONDS)) {
-    // More gradual curve fast -> slow
-    const p = (pos - (acc - RAMP_DOWN_SECONDS)) / RAMP_DOWN_SECONDS; // 0..1
-    const eased = easeInPow(p, RAMP_DOWN_POWER);
-    return lerp(FAST_INTERVAL_MS, SLOW_INTERVAL_MS, eased);
+// Choose a random element from an array
+function randomChoice(arr) {
+  return arr[floor(random(arr.length))];
+}
+
+// Pick a random interval in [minMs, maxMs] on step increments (e.g., 250ms steps),
+// ensuring it's not identical to the current value (to guarantee actual change).
+function randomIntervalMsStepped(minMs, maxMs, stepMs, currentVal) {
+  const steps = floor((maxMs - minMs) / stepMs) + 1;
+  if (steps <= 1) return minMs;
+
+  let idx = floor(random(steps));
+  let val = minMs + idx * stepMs;
+
+  // Avoid no-op (same as current)
+  if (val === currentVal) {
+    idx = (idx + 1) % steps;
+    val = minMs + idx * stepMs;
   }
-
-  // Hold slow
-  return SLOW_INTERVAL_MS;
+  return val;
 }
 
 // --- Plop helper: trigger note + quick downward pitch slide ---
