@@ -1,12 +1,16 @@
 // sketch.js — Raindrop ripples with RANDOMIZED spawn-interval timeline
+// + Poisson/burst randomness for drop timing (no evenly-spaced ticks)
+// Sound remains the earlier MonoSynth plop implementation.
+//
+// Timeline behavior:
 // - Always start SLOW (10000 ms/drop)
 // - Ramp up to FAST (250 ms/drop) over 45 s
 // - Hold FAST for 45 s
 // - After that, endlessly create new *ramp segments* where:
 //     • duration is randomly chosen from {15, 30, 45} seconds
 //     • target interval is randomly chosen from 250..10000 ms in 250 ms steps
-// - Rings + soft “plop” notes in G major; click to enable audio. Hint fades out.
-
+// - Click/tap to enable audio (iOS safe). Hint fades out after interaction.
+//
 // ============ Visual knobs ============
 const GROWTH_RATE_PX_PER_SEC = 140; // ring expansion speed
 const START_RADIUS = 0;             // 0 = point birth
@@ -29,17 +33,25 @@ const MIN_INTERVAL_MS = 250;                   // random interval floor
 const MAX_INTERVAL_MS = 10000;                 // random interval ceiling
 const INTERVAL_STEP_MS = 250;                  // step size for random intervals
 
-// ============ Sound knobs (lower, “plop”) ============
+// ============ Poisson spawn randomness ============
+let nextSpawnDueMs = null;        // absolute time (millis) for the next drop
+const BURST_PROB = 0.12;          // chance a spawn is followed by extra drops
+const BURST_MAX_EXTRA = 3;        // up to N extra drops immediately
+
+function expMs(meanMs) {
+  // Exponential RV with mean = meanMs
+  return -Math.log(1 - random()) * meanMs;
+}
+function scheduleNext(meanMs) {
+  nextSpawnDueMs = millis() + expMs(meanMs);
+}
+
+// ============ Sound knobs (MonoSynth “plop”) ============
 const ENABLE_SOUND = true;
 const NOTE_LEN_SECONDS = 0.10;
 const NOTE_VELOCITY = 0.12;
 const ATTACK = 0.004, DECAY = 0.07, SUSTAIN = 0.0, RELEASE = 0.12;
 const WAVEFORM = "sine";
-
-// Downward pitch slide for "plop":
-const PLOP_MIN_DROP_SEMITONES = 3;
-const PLOP_MAX_DROP_SEMITONES = 7;
-const PLOP_GLIDE_TIME = 0.05;
 
 // G major, lowered one octave: MIDI G4..G5 (C4 = 60)
 const G_MAJOR_MIDI = [67, 69, 71, 72, 74, 76, 78, 79];
@@ -50,7 +62,6 @@ const HINT_FADE_SECONDS = 1.0; // fade-out duration after first click
 
 // ------- internal state -------
 let drops = [];
-let spawnAccumulator = 0; // when >= 1, spawn a drop
 
 // Sound
 let synth;
@@ -104,16 +115,20 @@ function setup() {
   textAlign(CENTER, TOP);
 
   if (ENABLE_SOUND) {
+    // p5.MonoSynth
     synth = new p5.MonoSynth();
     synth.setADSR(ATTACK, DECAY, SUSTAIN, RELEASE);
     synth.oscillator.setType(WAVEFORM);
-    synth.portamento = 0; // manual glide
+    synth.portamento = 0;
   }
 
   // Initialize the first segment as a ramp from SLOW -> FAST (45 s),
   // then schedule an automatic hold at FAST (45 s) next.
   seg = makeRampSegment(SLOW_INTERVAL_MS, FAST_INTERVAL_MS, 45);
   seg._presetHoldNext = true;
+
+  // Start with slow mean interval for the first spawn
+  scheduleNext(SLOW_INTERVAL_MS);
 }
 
 function windowResized() {
@@ -125,22 +140,26 @@ function draw() {
   background(210, 70, 12); // deep blue
   const dtSec = deltaTime / 1000;
 
-  // Determine current spawn interval from the active segment
-  const intervalMs = currentIntervalMs();
+  // Determine current mean interval from the active segment
+  const meanMs = currentIntervalMs();
+  const nowMs = millis();
 
-  // Accumulate spawns proportionally to (deltaTime / interval)
-  spawnAccumulator += deltaTime / intervalMs;
-  while (spawnAccumulator >= 1) {
-    const x = random(width);
-    const y = random(height);
-    drops.push(new Drop(x, y));
-    spawnAccumulator -= 1;
+  // Poisson-style spawns with bursts; catch up if multiple due this frame
+  while (nextSpawnDueMs !== null && nowMs >= nextSpawnDueMs) {
+    spawnDrop();
 
-    if (ENABLE_SOUND && audioEnabled && synth) {
-      const midi = random(G_MAJOR_MIDI);
-      const startHz = midiToFreq(midi);
-      playPlop(startHz);
+    // occasional burst: a few extra drops at (nearly) the same moment
+    if (random() < BURST_PROB) {
+      const extras = 1 + floor(random(BURST_MAX_EXTRA + 1)); // 1..BURST_MAX_EXTRA
+      for (let i = 0; i < extras; i++) {
+        spawnDrop();
+      }
+      // tiny nudge so they’re not exactly the same timestamp
+      nextSpawnDueMs = nowMs + random(5, 25);
     }
+
+    // schedule the next spawn using the *current* mean interval
+    scheduleNext(meanMs);
   }
 
   // Update & render drops
@@ -160,6 +179,19 @@ function draw() {
     fill(0, 0, 100, hintAlpha);
     textSize(14);
     text(HINT_TEXT, width / 2, 8);
+  }
+}
+
+// Single place to create a drop + sound
+function spawnDrop() {
+  const x = random(width);
+  const y = random(height);
+  drops.push(new Drop(x, y));
+
+  if (ENABLE_SOUND && audioEnabled && synth) {
+    const midi = random(G_MAJOR_MIDI);
+    const startHz = midiToFreq(midi);
+    playPlop(startHz);
   }
 }
 
@@ -250,29 +282,27 @@ function randomIntervalMsStepped(minMs, maxMs, stepMs, currentVal) {
   return val;
 }
 
-// --- Plop helper: trigger note + quick downward pitch slide ---
+// --- MonoSynth plop helper: quick downward pitch slide ---
 function playPlop(startHz) {
   synth.play(startHz, NOTE_VELOCITY, 0, NOTE_LEN_SECONDS);
-  const semitoneDrop = random(PLOP_MIN_DROP_SEMITONES, PLOP_MAX_DROP_SEMITONES);
+  const semitoneDrop = random(3, 7);
   const targetHz = startHz * pow(2, -semitoneDrop / 12);
-  synth.oscillator.freq(targetHz, PLOP_GLIDE_TIME);
+  synth.oscillator.freq(targetHz, 0.05);
 }
 
-// Enable audio on first user interaction (required by browsers)
-// Also start fading the hint after any user interaction.
-function mousePressed() { hintFading = true; enableAudioIfNeeded(); }
-function touchStarted() { hintFading = true; enableAudioIfNeeded(); }
-function keyPressed()   { hintFading = true; enableAudioIfNeeded(); }
-
+// --- iOS/desktop-safe audio unlock (canvas-only) ---
 async function enableAudioIfNeeded() {
   try {
     const ctx = getAudioContext();
-    // Must run inside a user gesture on iOS
-    await userStartAudio();
+    await userStartAudio();                 // must be inside a user gesture
     if (ctx.state !== 'running') await ctx.resume();
     audioEnabled = (ctx.state === 'running');
-    if (audioEnabled) hintFading = true; // fade your "CLICK FOR SOUND" text
+    if (audioEnabled) hintFading = true;   // fade your "CLICK FOR SOUND" text
   } catch (e) {
     audioEnabled = false;
   }
 }
+
+function mousePressed() { hintFading = true; enableAudioIfNeeded(); }
+function touchStarted() { hintFading = true; enableAudioIfNeeded(); }
+function keyPressed()   { hintFading = true; enableAudioIfNeeded(); }
