@@ -1,15 +1,8 @@
-// sketch.js — Raindrop ripples with RANDOMIZED spawn-interval timeline
-// + Poisson/burst randomness for drop timing (no evenly-spaced ticks)
-// Sound remains the earlier MonoSynth plop implementation.
-//
-// Timeline behavior:
-// - Always start SLOW (10000 ms/drop)
-// - Ramp up to FAST (250 ms/drop) over 45 s
-// - Hold FAST for 45 s
-// - After that, endlessly create new *ramp segments* where:
-//     • duration is randomly chosen from {15, 30, 45} seconds
-//     • target interval is randomly chosen from 250..10000 ms in 250 ms steps
-// - Click/tap to enable audio (iOS safe). Hint fades out after interaction.
+// sketch.js — Start-gated: first click starts audio+timeline; no drops on later clicks
+// - "CLICK TO START" appears; nothing spawns until you click
+// - On first click: unlock audio, fade hint, schedule first drop ~50ms later
+// - Poisson/burst randomness + randomized interval timeline
+// - Older p5.MonoSynth "plop" sound (downward glide)
 //
 // ============ Visual knobs ============
 const GROWTH_RATE_PX_PER_SEC = 140; // ring expansion speed
@@ -57,11 +50,12 @@ const WAVEFORM = "sine";
 const G_MAJOR_MIDI = [67, 69, 71, 72, 74, 76, 78, 79];
 
 // ============ Hint text ============
-const HINT_TEXT = "CLICK FOR SOUND";
+const HINT_TEXT = "CLICK TO START";
 const HINT_FADE_SECONDS = 1.0; // fade-out duration after first click
 
 // ------- internal state -------
 let drops = [];
+let started = false;       // NEW: gate the timeline until first click
 
 // Sound
 let synth;
@@ -122,13 +116,12 @@ function setup() {
     synth.portamento = 0;
   }
 
-  // Initialize the first segment as a ramp from SLOW -> FAST (45 s),
-  // then schedule an automatic hold at FAST (45 s) next.
+  // Define the timeline segments but DO NOT schedule spawns yet.
+  // Start: ramp SLOW -> FAST over 45s, then preset a 45s FAST hold.
   seg = makeRampSegment(SLOW_INTERVAL_MS, FAST_INTERVAL_MS, 45);
   seg._presetHoldNext = true;
 
-  // Start with slow mean interval for the first spawn
-  scheduleNext(SLOW_INTERVAL_MS);
+  // Leave nextSpawnDueMs = null until the user starts.
 }
 
 function windowResized() {
@@ -142,24 +135,28 @@ function draw() {
 
   // Determine current mean interval from the active segment
   const meanMs = currentIntervalMs();
-  const nowMs = millis();
 
-  // Poisson-style spawns with bursts; catch up if multiple due this frame
-  while (nextSpawnDueMs !== null && nowMs >= nextSpawnDueMs) {
-    spawnDrop();
+  // Only run the spawn scheduler after the user has started
+  if (started) {
+    const nowMs = millis();
 
-    // occasional burst: a few extra drops at (nearly) the same moment
-    if (random() < BURST_PROB) {
-      const extras = 1 + floor(random(BURST_MAX_EXTRA + 1)); // 1..BURST_MAX_EXTRA
-      for (let i = 0; i < extras; i++) {
-        spawnDrop();
+    // Poisson-style spawns with bursts; catch up if multiple due this frame
+    while (nextSpawnDueMs !== null && nowMs >= nextSpawnDueMs) {
+      spawnDrop();
+
+      // occasional burst: a few extra drops at (nearly) the same moment
+      if (random() < BURST_PROB) {
+        const extras = 1 + floor(random(BURST_MAX_EXTRA + 1)); // 1..BURST_MAX_EXTRA
+        for (let i = 0; i < extras; i++) {
+          spawnDrop();
+        }
+        // tiny nudge so they’re not exactly the same timestamp
+        nextSpawnDueMs = nowMs + random(5, 25);
       }
-      // tiny nudge so they’re not exactly the same timestamp
-      nextSpawnDueMs = nowMs + random(5, 25);
-    }
 
-    // schedule the next spawn using the *current* mean interval
-    scheduleNext(meanMs);
+      // schedule the next spawn using the *current* mean interval
+      scheduleNext(meanMs);
+    }
   }
 
   // Update & render drops
@@ -237,7 +234,6 @@ function currentIntervalMs() {
     if (seg._presetHoldNext) {
       // Enforce the initial FAST hold (45 s), then clear the flag
       seg = makeHoldSegment(FAST_INTERVAL_MS, 45);
-      // nothing preset after this
     } else {
       // After the initial 2 segments, always generate a new random *ramp* segment
       // from the current end value to a random target interval, over a random duration.
@@ -290,19 +286,32 @@ function playPlop(startHz) {
   synth.oscillator.freq(targetHz, 0.05);
 }
 
-// --- iOS/desktop-safe audio unlock (canvas-only) ---
-async function enableAudioIfNeeded() {
+// --- Start button / audio unlock (canvas-only) ---
+let _startAttempted = false;
+async function startIfNeeded() {
+  if (_startAttempted) return; // only act on the FIRST user gesture
+  _startAttempted = true;
+
+  // Start timeline regardless of audio success
+  started = true;
+  hintFading = true;
+
+  // Schedule the first spawn ~50ms from now, and seed the scheduler
+  nextSpawnDueMs = millis() + 50;  // immediate first drop
+  scheduleNext(SLOW_INTERVAL_MS);  // seed ongoing scheduling from slow mean
+
+  // Try to unlock audio
   try {
     const ctx = getAudioContext();
     await userStartAudio();                 // must be inside a user gesture
     if (ctx.state !== 'running') await ctx.resume();
     audioEnabled = (ctx.state === 'running');
-    if (audioEnabled) hintFading = true;   // fade your "CLICK FOR SOUND" text
   } catch (e) {
     audioEnabled = false;
   }
 }
 
-function mousePressed() { hintFading = true; enableAudioIfNeeded(); }
-function touchStarted() { hintFading = true; enableAudioIfNeeded(); }
-function keyPressed()   { hintFading = true; enableAudioIfNeeded(); }
+// Only the first click/touch/keypress will start things. Later clicks do nothing.
+function mousePressed() { startIfNeeded(); }
+function touchStarted() { startIfNeeded(); }
+function keyPressed()   { startIfNeeded(); }
