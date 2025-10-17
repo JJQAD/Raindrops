@@ -297,7 +297,7 @@ async function startIfNeeded() {
   hintFading = true;
 
   // Schedule the first spawn ~50ms from now, and seed the scheduler
-  nextSpawnDueMs = millis() + 50;  // immediate first drop
+  nextSpawnDueMs = millis() + 25;  // immediate first drop
   scheduleNext(SLOW_INTERVAL_MS);  // seed ongoing scheduling from slow mean
 
   // Try to unlock audio
